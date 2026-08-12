@@ -5,6 +5,10 @@ const QRCode = require('qrcode');
 const fs = require('fs');
 const P = require('pino');
 const axios = require('axios');
+const https = require('https');
+
+// ✅ اجبار الاتصال IPv4 فقط لحل مشكلة ETIMEDOUT في Render
+const httpsAgent = new https.Agent({ family: 4, keepAlive: true });
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -17,42 +21,64 @@ let lastFetch = 0;
 // الشيت بتاعك: اسعار شركة ابو حريره
 const SHEET_CSV_URL = process.env.SHEET_URL || 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRBtqGW3UGDuPtr8POlTvfKilCWDlxnd4_rjV3jNbtZd2S-0x-WVjcITJhpsjrFuJB1jsl9zzvKVYMs/pub?output=csv';
 
-async function fetchFromSheet(){
+async function fetchFromSheet(retries=3){
   if(!SHEET_CSV_URL) return null;
-  try{
-    const res = await axios.get(SHEET_CSV_URL, { timeout: 15000 });
-    const lines = res.data.split('\n').filter(l=>l.trim());
-    if(lines.length < 2) return null;
-    const headers = lines[0].split(',').map(h=>h.trim().toLowerCase().replace(/^"|"$/g,''));
-    const products = [];
-    for(let i=1;i<lines.length;i++){
-      // CSV simple parser - handles quoted commas
-      let row = lines[i];
-      let values = [];
-      let cur = '';
-      let inQuote = false;
-      for(let ch of row){
-        if(ch=='"'){ inQuote=!inQuote; continue; }
-        if(ch==',' && !inQuote){ values.push(cur.trim()); cur=''; } else cur+=ch;
+  for(let attempt=1; attempt<=retries; attempt++){
+    try{
+      const res = await axios.get(SHEET_CSV_URL, { 
+        timeout: 20000,
+        httpsAgent: httpsAgent,
+        headers: {
+          'User-Agent': 'Mozilla/5.0',
+          'Accept': 'text/csv, text/plain, */*'
+        }
+      });
+      const lines = res.data.split('\n').filter(l=>l.trim());
+      if(lines.length < 2){
+        console.log('Sheet empty or no data');
+        return null;
       }
-      values.push(cur.trim());
-      const obj = {};
-      headers.forEach((h,idx)=> obj[h]=values[idx]||'');
-      if(obj.code && obj.code.trim()){
-        products.push({
-          code: obj.code.trim().toUpperCase(),
-          name: (obj.name || obj.code).trim(),
-          category: (obj.category || 'رجالي').trim(),
-          priceDozen: parseInt((obj.pricedozen || obj.price || '0').replace(/[^0-9]/g,'')) || 0,
-          image: (obj.image || '').trim()
-        });
+      const headers = lines[0].split(',').map(h=>h.trim().toLowerCase().replace(/^"|"$/g,''));
+      const products = [];
+      for(let i=1;i<lines.length;i++){
+        let row = lines[i];
+        let values = [];
+        let cur = '';
+        let inQuote = false;
+        for(let ch of row){
+          if(ch=='"'){ inQuote=!inQuote; continue; }
+          if(ch==',' && !inQuote){ values.push(cur.trim()); cur=''; } else cur+=ch;
+        }
+        values.push(cur.trim());
+        const obj = {};
+        headers.forEach((h,idx)=> obj[h]=values[idx]||'');
+        if(obj.code && obj.code.trim()){
+          products.push({
+            code: obj.code.trim().toUpperCase(),
+            name: (obj.name || obj.code).trim(),
+            category: (obj.category || 'رجالي').trim(),
+            priceDozen: parseInt((obj.pricedozen || obj.price || '0').replace(/[^0-9]/g,'')) || 0,
+            image: (obj.image || '').trim()
+          });
+        }
       }
+      if(products.length>0){
+        console.log(`✅ Sheet loaded: ${products.length} products (attempt ${attempt})`);
+        return products;
+      }
+      return null;
+    }catch(e){
+      console.log(`⚠️ Sheet fetch attempt ${attempt}/${retries} failed: ${e.message}`);
+      if(attempt < retries){
+        await new Promise(r=> setTimeout(r, 2000*attempt));
+        continue;
+      }
+      console.log('Sheet fetch error final:', e.message);
+      // لا ترجع null لو في كاش قديم
+      return null;
     }
-    return products;
-  }catch(e){
-    console.log('Sheet fetch error', e.message);
-    return null;
   }
+  return null;
 }
 
 function loadProducts(){
