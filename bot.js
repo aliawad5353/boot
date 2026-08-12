@@ -120,14 +120,17 @@ setInterval(async ()=>{
   }
 })();
 
-// ======== حساب السعر الذكي 2 دستة و 4 دستة ========
+// ======== حساب السعر الذكي 2 دستة و 4 دستة - حسب طلب العميل ========
+// السعر في الشيت هو سعر الدستة الواحدة
+// لو الاسم فيه 2 دسته => سعر الكرتونة = priceDozen * 2
+// لو الاسم فيه 4 دسته => سعر الكرتونة = priceDozen * 4
 function getCartonDetails(product){
   const name = (product.name||'').toLowerCase();
-  const has2 = name.includes('2 دسته') || name.includes('2 دستة') || name.includes('2دسته') || name.includes('2دستة') || name.includes('2 dozen');
+  const has2 = name.includes('2 دسته') || name.includes('2 دستة') || name.includes('2دسته') || name.includes('2دستة');
   const dozenCount = has2 ? 2 : 4;
   const pieces = dozenCount * 12;
   const priceDozen = parseInt(product.priceDozen)||0;
-  const price = priceDozen * dozenCount;
+  const price = priceDozen * dozenCount; // سعر الكرتونة
   return { price, dozenCount, pieces, priceDozen };
 }
 
