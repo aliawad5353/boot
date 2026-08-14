@@ -1,4 +1,4 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, delay } = require('@whiskeysockets/baileys');
 const express = require('express');
 const axios = require('axios');
 const QRCode = require('qrcode');
@@ -9,14 +9,15 @@ const PORT = process.env.PORT || 5000;
 
 let latestQR = null;
 let isConnected = false;
+let sock = null;
 
-// 1. عرض الباركود أو حالة الاتصال عند فتح رابط Render
+// 1. خادم Express لعرض الباركود
 app.get('/', async (req, res) => {
     if (isConnected) {
         return res.send(`
             <div style="text-align: center; font-family: sans-serif; margin-top: 50px;">
                 <h1 style="color: #2e7d32;">✅ البوت متصل بالواتساب بنجاح!</h1>
-                <p style="font-size: 18px;">سيرفر شركة أبو حريرة يعمل الآن في الخلفية ويستقبل الرسائل.</p>
+                <p style="font-size: 18px;">سيرفر أبو حريرة يعمل في الخلفية ويستقبل طلبات الزبائن بالصور المباشرة.</p>
             </div>
         `);
     }
@@ -126,7 +127,7 @@ async function loadProducts() {
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info');
     
-    const sock = makeWASocket({
+    sock = makeWASocket({
         logger: pino({ level: 'silent' }),
         auth: state
     });
@@ -159,22 +160,17 @@ async function startBot() {
             if (!msg.message || msg.key.fromMe) continue;
             
             const senderJid = msg.key.remoteJid;
-
-            // منع الرد على المجموعات
-            if (senderJid.endsWith('@g.us')) continue;
+            if (senderJid.endsWith('@g.us')) continue; // منع الرد في الجروبات
 
             const text = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
             if (!text) continue;
 
-            const replyText = await handleUserMessage(senderJid, text.trim());
-            if (replyText) {
-                await sock.sendMessage(senderJid, { text: replyText });
-            }
+            await handleUserMessage(senderJid, text.trim());
         }
     });
 }
 
-// 4. معالجة الردود للفاتورة المبدئية
+// 4. دالة المحادثة التفاعلية بالصور المباشرة
 async function handleUserMessage(sender, textMsg) {
     const num = parseArabicInt(textMsg);
     let session = userSessions[sender] || { step: "WELCOME", cart: [], filtered: [] };
@@ -182,13 +178,14 @@ async function handleUserMessage(sender, textMsg) {
 
     const products = await loadProducts();
     const categoriesMap = { 1: "رجالي", 2: "نسائي", 3: "صبياني", 4: "اطفالي" };
-    let reply = "";
 
+    // 🟢 القائمة الرئيسية
     if (textMsg === "0" || currentStep === "WELCOME") {
         session.step = "SELECT_CATEGORY";
-        session.cart = [];
-        reply = "مرحب بكم في شركة أبوحريرة الوكيل الحصري بالسودان لأحذية لوفو 👟\n⚠️ تنبيه: البيع بالكرتونة فقط لا يوجد بيع بالدسته أو بالحبة.\n📍 فروعنا: مدني وسوق ليبيا.\n\nاختر القسم:\n1. رجالي\n2. نسائي\n3. صبياني\n4. اطفالي\n\n0. الرجوع للقائمة الرئيسية في أي وقت";
+        const replyText = "مرحب بكم في شركة أبوحريرة الوكيل الحصري بالسودان لأحذية لوفو 👟\n⚠️ تنبيه: البيع بالكرتونة فقط لا يوجد بيع بالدسته أو بالحبة.\n📍 فروعنا: مدني وسوق ليبيا.\n\nاختر القسم:\n1. رجالي\n2. نسائي\n3. صبياني\n4. اطفالي\n\n0. الرجوع للقائمة الرئيسية في أي وقت";
+        await sock.sendMessage(sender, { text: replyText });
     }
+    // 🟢 اختيار القسم واستعراض الأصناف (صورة لكل صنف + بياناته تحتها مباشرة)
     else if (currentStep === "SELECT_CATEGORY") {
         if (num && categoriesMap[num]) {
             const catName = categoriesMap[num];
@@ -196,52 +193,100 @@ async function handleUserMessage(sender, textMsg) {
             session.filtered = filtered;
 
             if (filtered.length === 0) {
-                reply = `عذراً، لا توجد أصناف متوفرة في قسم (${catName}).\n\n0. للرجوع للقائمة`;
+                await sock.sendMessage(sender, { text: `عذراً، لا توجد أصناف متوفرة حالياً في قسم (${catName}).\n\n0. للرجوع للقائمة` });
             } else {
                 session.step = "SELECT_ITEM";
-                reply = `--- أصناف (${catName}) ---\n\n`;
-                filtered.forEach((item, idx) => {
+                await sock.sendMessage(sender, { text: `📦 *اصناف ${catName} - ${filtered.length} صنف*\nسأعرضها لك الآن...` });
+
+                for (let i = 0; i < filtered.length; i++) {
+                    const item = filtered[i];
                     const code = item.code || "بدون كود";
-                    const img = item.image || "";
-                    reply += `${idx + 1}. كود: ${code}\n🔗 الصورة: ${img}\n\n`;
-                });
-                reply += "اختر رقم صنف واحد فقط من القائمة (أو 0 للرجوع):";
+                    const imageUrl = item.image || "";
+
+                    const priceDozen = cleanPrice(item.priceDozen || item.سعر_الدستة || 0);
+                    const dozensPerCarton = getDozens(item.name || item.اسم_الصنف || "");
+                    const cartonPrice = priceDozen * dozensPerCarton;
+
+                    // النص الذي يظهر أسفل صورة الصنف تماماً
+                    const captionText = `✅ *كرتونة أحذية لوفو ${dozensPerCarton} دسته*\n` +
+                                       `${catName}\n` +
+                                       `*الكود:* ${code}\n` +
+                                       `*القسم:* ${catName}\n` +
+                                       `*الكرتونة:* ${dozensPerCarton} دستة (${dozensPerCarton * 12} حبة)\n` +
+                                       `*سعر الكرتونة:* ${cartonPrice.toLocaleString('en-US')} جنيه\n\n` +
+                                       `👉 *لاختيار هذا الصنف اكتب رقم: (${i + 1})*`;
+
+                    if (imageUrl && (imageUrl.startsWith('http://') || imageUrl.startsWith('https://'))) {
+                        await sock.sendMessage(sender, { 
+                            image: { url: imageUrl }, 
+                            caption: captionText 
+                        });
+                        await delay(1200); // تأخير زمني طفيف لضمان ترتيب الوصول
+                    } else {
+                        await sock.sendMessage(sender, { text: captionText });
+                    }
+                }
+                
+                await sock.sendMessage(sender, { text: `👆 أكتب رقم الصنف للطلب (من 1 إلى ${filtered.length}) أو اضغط 0 للرجوع للقائمة.` });
             }
         } else {
-            reply = "⚠️ خيار غير صحيح! اختر رقم من (1 إلى 4) أو 0 للرجوع.";
+            await sock.sendMessage(sender, { text: "⚠️ خيار غير صحيح! اختر رقم القسم من (1 إلى 4) أو 0 للرجوع." });
         }
     }
+    // 🟢 الزبون اختار صنفاً برقم محدد
     else if (currentStep === "SELECT_ITEM") {
         const filtered = session.filtered || [];
         if (num && num >= 1 && num <= filtered.length) {
             session.currentItem = filtered[num - 1];
             session.step = "ENTER_QTY";
-            const itemCode = session.currentItem.code || "";
-            reply = `داير كم كرتونة من كود [${itemCode}]؟\n(أدخل الرقم فقط، مثلاً: 1 أو 2)`;
+            
+            const item = session.currentItem;
+            const itemCode = item.code || "";
+            const imageUrl = item.image || "";
+
+            // إرسال صورة الصنف الذي اختاره للتأكيد وسؤاله عن الكمية
+            const selectedCaption = `🎯 *اخترت الصنف كود [${itemCode}]*\n\nداير منه كم كرتونة؟ (أدخل الرقم فقط، مثلاً: 1 أو 2):`;
+
+            if (imageUrl && (imageUrl.startsWith('http://') || imageUrl.startsWith('https://'))) {
+                await sock.sendMessage(sender, { image: { url: imageUrl }, caption: selectedCaption });
+            } else {
+                await sock.sendMessage(sender, { text: selectedCaption });
+            }
         } else {
-            reply = "⚠️ خطأ! أدخل رقم الصنف من القائمة الموضحة اعلاه، أو 0 للرجوع.";
+            await sock.sendMessage(sender, { text: "⚠️ رقم صنف غير صحيح! اختر الرقم المكتوب أسفل صورة الصنف، أو 0 للرجوع." });
         }
     }
+    // 🟢 تحديد الكمية وإضافة الصنف للسلة
     else if (currentStep === "ENTER_QTY") {
         if (num && num > 0) {
             session.cart.push({ item: session.currentItem, qty: num });
             session.step = "ASK_MORE";
-            reply = "تمت إضافة الصنف للسلة ✅\n\nهل تريد صنف آخر؟\n• اكتب (0) للرجوع وتصفح صنف/قسم آخر.\n• أو اكتب (1) لإصدار الفاتورة المبدئية.";
+
+            const msg = `تمت إضافة (${num}) كرتونة من الكود [${session.currentItem.code}] بنجاح ✅\n\n` +
+                        `هل تحتاج صنف آخر؟\n` +
+                        `• اضغط *(0)* للرجوع للقائمة واختيار صنف آخر.\n` +
+                        `• اضغط *(1)* لإصدار الفاتورة وتأكيد الشراء.`;
+
+            await sock.sendMessage(sender, { text: msg });
         } else {
-            reply = "⚠️ أدخل عدد كراتين صحيح (مثال: 1 أو 2).";
+            await sock.sendMessage(sender, { text: "⚠️ أدخل عدد كراتين صحيح (مثال: 1 أو 2)." });
         }
     }
+    // 🟢 خيار إضافة صنف آخر أو الذهاب للفاتورة
     else if (currentStep === "ASK_MORE") {
         if (num === 0) {
             session.step = "SELECT_CATEGORY";
-            reply = "اختر القسم:\n1. رجالي\n2. نسائي\n3. صبياني\n4. اطفالي";
+            await sock.sendMessage(sender, { 
+                text: "اختر القسم لاضافة صنف جديد:\n1. رجالي\n2. نسائي\n3. صبياني\n4. اطفالي" 
+            });
         } else if (num === 1) {
             const cart = session.cart || [];
             if (cart.length === 0) {
-                reply = "سلتك فارغة! اكتب 0 للبدء واختيار الأصناف.";
+                await sock.sendMessage(sender, { text: "السلة فارغة! اضغط 0 لاختيار الأصناف." });
             } else {
                 let totalAll = 0;
-                reply = "🧾 *الفاتورة المبدئية - شركة أبو حريرة*\n========================================\n";
+                let invoiceText = "🧾 *الفاتورة المبدئية - شركة أبو حريرة*\n========================================\n\n";
+                
                 cart.forEach((entry, idx) => {
                     const item = entry.item || {};
                     const qty = entry.qty || 1;
@@ -253,35 +298,47 @@ async function handleUserMessage(sender, textMsg) {
                     const itemTotal = cartonPrice * qty;
                     totalAll += itemTotal;
 
-                    reply += `${idx + 1}. كود الصنف: ${item.code || ''}\n   الكمية: ${qty} كرتونة | الإجمالي: ${itemTotal.toLocaleString('en-US')} ج.س\n   🔗 ${item.image || ''}\n\n`;
+                    invoiceText += `${idx + 1}. كود: *${item.code || ''}*\n   الكمية: ${qty} كرتونة | الإجمالي: ${itemTotal.toLocaleString('en-US')} ج.س\n\n`;
                 });
 
-                reply += "----------------------------------------\n";
-                reply += `💰 *الجملة الإجمالية:* ${totalAll.toLocaleString('en-US')} جنيه سوداني\n`;
-                reply += "========================================\n\n";
-                reply += "اكتب (1) للتأكيد والتحويل، أو (2) للإلغاء.";
+                invoiceText += "----------------------------------------\n";
+                invoiceText += `💰 *إجمالي الفاتورة:* *${totalAll.toLocaleString('en-US')} جنيه سوداني*\n`;
+                invoiceText += "========================================\n\n";
+                invoiceText += "هل تريد الشراء والتأكيد؟\n• اضغط *(1)* للتحويل وتأكيد البيع.\n• اضغط *(2)* لإلغاء الطلب.";
+                
+                await sock.sendMessage(sender, { text: invoiceText });
                 session.step = "CONFIRM_INVOICE";
             }
         } else {
-            reply = "⚠️ اكتب (0) لاختيار صنف آخر، أو (1) لإصدار الفاتورة.";
+            await sock.sendMessage(sender, { text: "⚠️ اضغط (0) لاختيار صنف آخر، أو (1) لتأكيد الشراء والفاتورة." });
         }
     }
+    // 🟢 تأكيد الشراء وإرسال بيانات الحساب
     else if (currentStep === "CONFIRM_INVOICE") {
         if (textMsg === "1" || num === 1) {
-            reply = "✅ تم تأكيد طلبك مبدئياً!\n\nيرجى تحويل المبلغ إلى حسابنا:\n🏦 بنك الخرطوم: 2392448\n👤 الاسم: الشيخ السراج المأمون\n\nبعد التحويل يرجى إرسال:\n1. الإشعار (صورة)\n2. الاسم كامل\n3. الجهة المرحل لها واسم الترحيلات.";
+            const confirmText = "✅ *تم تأكيد طلبك بنجاح!*\n\n" +
+                                "يرجى تحويل المبلغ إلى حسابنا البنكي:\n" +
+                                "🏦 *بنك الخرطوم:* 2392448\n" +
+                                "👤 *الاسم:* الشيخ السراج المأمون\n\n" +
+                                "من فضلك بعد التحويل أرسل لنا هنا:\n" +
+                                "1️⃣ صورة إشعار التحويل.\n" +
+                                "2️⃣ الاسم الكامل لصاحب الطلب.\n" +
+                                "3️⃣ المدينة/المنطقة واسم شركة الترحيلات المطلوبة.\n\n" +
+                                "شكراً لتستوقكم من شركة أبو حريرة! ❤️";
+            
+            await sock.sendMessage(sender, { text: confirmText });
             session = { step: "WELCOME", cart: [], filtered: [] };
         } else {
-            reply = "❌ تم إلغاء الطلب. اكتب (0) للبدء من جديد في أي وقت.";
+            await sock.sendMessage(sender, { text: "❌ تم إلغاء الطلب. اضغط (0) للبدء من جديد في أي وقت." });
             session = { step: "WELCOME", cart: [], filtered: [] };
         }
     }
     else {
-        reply = "يرجى كتابة رقم (0) للرجوع للقائمة الرئيسية.";
+        await sock.sendMessage(sender, { text: "يرجى كتابة رقم (0) للرجوع للقائمة الرئيسية." });
         session = { step: "WELCOME", cart: [], filtered: [] };
     }
 
     userSessions[sender] = session;
-    return reply;
 }
 
 startBot();
