@@ -1,28 +1,66 @@
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const express = require('express');
 const axios = require('axios');
-const qrcode = require('qrcode-terminal');
+const QRCode = require('qrcode');
 const pino = require('pino');
 
-// 1. إنشاء سيرفر Express لضمان عمل الخدمة على Render بدون توقف
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.get('/', (req, res) => {
-    res.send('✅ سيرفر بوت أبو حريرة يعمل بنجاح على Render!');
+let latestQR = null;
+let isConnected = false;
+
+// 1. عرض الباركود أو حالة الاتصال عند فتح رابط Render
+app.get('/', async (req, res) => {
+    if (isConnected) {
+        return res.send(`
+            <div style="text-align: center; font-family: sans-serif; margin-top: 50px;">
+                <h1 style="color: #2e7d32;">✅ البوت متصل بالواتساب بنجاح!</h1>
+                <p style="font-size: 18px;">سيرفر شركة أبو حريرة يعمل الآن في الخلفية ويستقبل الرسائل.</p>
+            </div>
+        `);
+    }
+
+    if (latestQR) {
+        try {
+            const qrImageUrl = await QRCode.toDataURL(latestQR);
+            return res.send(`
+                <div style="text-align: center; font-family: sans-serif; margin-top: 30px;">
+                    <h2 style="color: #075e54;">📲 امسح الباركود لربط واتساب أبو حريرة</h2>
+                    <p>افتح الواتساب ⬅️ الأجهزة المرتبطة ⬅️ ربط جهاز</p>
+                    <img src="${qrImageUrl}" style="width: 280px; height: 280px; border: 3px solid #075e54; padding: 10px; border-radius: 12px; background: white;" />
+                    <p style="color: gray; margin-top: 15px;">تتحدث الصفحة تلقائياً كل 5 ثوانٍ...</p>
+                    <script>
+                        setTimeout(() => { location.reload(); }, 5000);
+                    </script>
+                </div>
+            `);
+        } catch (err) {
+            return res.send("حدث خطأ أثناء إنشاء صورة الباركود.");
+        }
+    }
+
+    return res.send(`
+        <div style="text-align: center; font-family: sans-serif; margin-top: 50px;">
+            <h2>⏳ جاري تجهيز الباركود...</h2>
+            <p>يرجى الانتظار ثوانٍ معدودة وسنعرض الباركود تلقائياً.</p>
+            <script>
+                setTimeout(() => { location.reload(); }, 3000);
+            </script>
+        </div>
+    `);
 });
 
 app.listen(PORT, () => {
     console.log(`🚀 السيرفر يعمل على البورت: ${PORT}`);
 });
 
-// 2. إعدادات شيت قوقل وجلسات المستخدمين
+// 2. إعدادات شيت قوقل
 const SHEET_ID = "14JF5utSJlgNbna31axEkC9fqZsCJMAMW1kU_JVgFSmg";
 const SHEET_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv`;
 
 const userSessions = {};
 
-// دالة تحويل الأرقام العربية إلى إنجليزية
 function parseArabicInt(strVal) {
     if (!strVal) return null;
     const arabicDigits = "٠١٢٣٤٥٦٧٨٩";
@@ -36,7 +74,6 @@ function parseArabicInt(strVal) {
     return isNaN(num) ? null : num;
 }
 
-// دالة تنظيف الأسعار
 function cleanPrice(priceVal) {
     if (!priceVal) return 0.0;
     try {
@@ -53,16 +90,14 @@ function cleanPrice(priceVal) {
     }
 }
 
-// دالة تحديد عدد الدست في الكرتونة
 function getDozens(nameText) {
     if (!nameText) return 2;
     const match = nameText.toString().match(/(\d+)\s*دسته/);
     return match ? parseInt(match[1], 10) : 2;
 }
 
-// تحويل نص CSV الخاص بقوقل شيت إلى مصفوفة أصناف
 function parseCSV(csvText) {
-    const lines = csvText.split('\n').filter(line => line.trim() !== '');
+    const lines = csvText.split(/\r?\n/).filter(line => line.trim() !== '');
     if (lines.length < 2) return [];
     
     const headers = lines[0].split(',').map(h => h.replace(/^"|"$/g, '').trim());
@@ -77,7 +112,6 @@ function parseCSV(csvText) {
     });
 }
 
-// جلب البيانات المباشرة من قوقل شيت
 async function loadProducts() {
     try {
         const response = await axios.get(SHEET_URL, { headers: { 'User-Agent': 'Mozilla/5.0' } });
@@ -88,13 +122,12 @@ async function loadProducts() {
     }
 }
 
-// 3. تشغيل كود Baileys للربط بالواتساب
+// 3. تشغيل الواتساب عبر Baileys
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info');
     
     const sock = makeWASocket({
         logger: pino({ level: 'silent' }),
-        printQRInTerminal: true,
         auth: state
     });
 
@@ -104,20 +137,21 @@ async function startBot() {
         const { connection, lastDisconnect, qr } = update;
         
         if (qr) {
-            console.log("\n📲 امسح الباركود التالي عبر الواتساب (الأجهزة المرتبطة):\n");
-            qrcode.generate(qr, { small: true });
+            latestQR = qr;
+            isConnected = false;
         }
         
         if (connection === 'close') {
+            isConnected = false;
             const shouldReconnect = (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut);
-            console.log('🔄 تم قطع الاتصال، جاري إعادة الاتصال تلقائياً:', shouldReconnect);
             if (shouldReconnect) startBot();
         } else if (connection === 'open') {
-            console.log('✅ تم الاتصال بالواتساب بنجاح! البوت جاهز للاستقبال.');
+            isConnected = true;
+            latestQR = null;
+            console.log('✅ تم الاتصال بالواتساب بنجاح!');
         }
     });
 
-    // استقبال وتصفية الرسائل
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') return;
         
@@ -126,7 +160,7 @@ async function startBot() {
             
             const senderJid = msg.key.remoteJid;
 
-            // 🔴 حماية: منع الرد نهائياً على المجموعات (Groups)
+            // منع الرد على المجموعات
             if (senderJid.endsWith('@g.us')) continue;
 
             const text = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
@@ -140,7 +174,7 @@ async function startBot() {
     });
 }
 
-// 4. منطق المحادثة وتدفق الفاتورة المبدئية
+// 4. معالجة الردود للفاتورة المبدئية
 async function handleUserMessage(sender, textMsg) {
     const num = parseArabicInt(textMsg);
     let session = userSessions[sender] || { step: "WELCOME", cart: [], filtered: [] };
@@ -250,5 +284,4 @@ async function handleUserMessage(sender, textMsg) {
     return reply;
 }
 
-// بدء تشغيل البوت
 startBot();
