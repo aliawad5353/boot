@@ -1,171 +1,251 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
-const express = require('express');
-const QRCode = require('qrcode');
-const fs = require('fs');
-const P = require('pino');
-const axios = require('axios');
-const https = require('https');
+import csv
+import json
+import os
+import re
+import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
-const httpsAgent = new https.Agent({ family: 4, keepAlive: true });
-const app = express();
-const PORT = process.env.PORT || 3000;
-let qrString = null;
-let sock = null;
+SHEET_ID = "14JF5utSJlgNbna31axEkC9fqZsCJMAMW1kU_JVgFSmg"
+URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv"
 
-let cachedProducts = null;
-const SHEET_CSV_URL = process.env.SHEET_URL || 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRBtqGW3UGDuPtr8POlTvfKilCWDlxnd4_rjV3jNbtZd2S-0x-WVjcITJhpsjrFuJB1jsl9zzvKVYMs/pub?output=csv';
+user_sessions = {}
 
-// --- تحميل المنتجات من الشيت ---
-async function fetchFromSheet(){
-  try{
-    const res = await axios.get(SHEET_CSV_URL, { timeout: 20000, httpsAgent, headers: {'User-Agent':'Mozilla/5.0'} });
-    const lines = res.data.split('\n').filter(l=>l.trim());
-    const headers = lines[0].split(',').map(h=>h.trim().toLowerCase().replace(/^"|"$/g,''));
-    const products = [];
-    for(let i=1;i<lines.length;i++){
-      let row = lines[i]; let values=[]; let cur=''; let inQuote=false;
-      for(let ch of row){ if(ch=='"'){inQuote=!inQuote; continue;} if(ch==',' &&!inQuote){values.push(cur.trim()); cur='';} else cur+=ch; }
-      values.push(cur.trim());
-      const obj={}; headers.forEach((h,idx)=> obj[h]=values[idx]||'');
-      if(obj.code) products.push({
-        code: obj.code.trim().toUpperCase(),
-        name: (obj.name||obj.code).trim(),
-        category: (obj.category||'رجالي').trim(),
-        priceDozen: parseInt((obj.pricedozen||'0').replace(/[^0-9]/g,''))||0,
-        image: (obj.image||'').trim()
-      });
-    }
-    if(products.length>0){ cachedProducts=products; console.log(`✅ Sheet: ${products.length}`); return products; }
-  }catch(e){ console.log('Sheet Error:', e.message); }
-  return cachedProducts;
-}
-function loadProducts(){ return cachedProducts||[]; }
-setInterval(fetchFromSheet, 60*1000);
-fetchFromSheet();
 
-// حساب السعر
-function getCartonDetails(p){
-  const name=(p.name||'').toLowerCase();
-  const has2 = name.includes('2 دسته')||name.includes('2 دستة');
-  const dozenCount = has2?2:4; const pieces=dozenCount*12;
-  return { price: p.priceDozen*dozenCount, dozenCount, pieces, priceDozen:p.priceDozen };
-}
+def load_products():
+  try:
+    req = urllib.request.Request(URL, headers={"User-Agent": "Mozilla/5.0"})
+    response = urllib.request.urlopen(req, timeout=5)
+    lines = [line.decode("utf-8") for line in response.readlines()]
+    return list(csv.DictReader(lines))
+  except Exception as e:
+    return []
 
-const WELCOME_MSG = `🏢 *مرحبا بكم في شركة ابو حريره للاحذية*
-الوكيل الحصري لاحذية لوفو بالسودان ⭐
 
-📢 *تنبيه مهم:*
-البيع بالكرتونة فقط - لايوجد بيع بالحبة او بالدستة والاسعار نهائية
-━━━━━━━━━━━━━━━━
-📂 *القائمة الرئيسية:*
-1️⃣ 👞 رجالي
-2️⃣ 👠 نسائي
-3️⃣ 👶 اطفالي
-4️⃣ 🧒 صبياني
-0️⃣ ❌ خروج
-👉 ارسل رقم القسم (مثلا: 1)`;
+def parse_arabic_int(str_val):
+  if not str_val:
+    return None
+  arabic_digits = "٠١٢٣٤٥٦٧٨٩"
+  english_digits = "0123456789"
+  trans = str.maketrans(arabic_digits, english_digits)
+  clean = str(str_val).translate(trans).strip()
+  return int(clean) if clean.isdigit() else None
 
-const sessions={};
 
-async function startBot(){
-  const { state, saveCreds } = await useMultiFileAuthState('auth');
-  sock = makeWASocket({ auth: state, logger: P({level:'silent'}), browser:["AbuHrira","Chrome","1.0"] });
-  sock.ev.on('creds.update', saveCreds);
-  sock.ev.on('connection.update', async (update)=>{
-    const { connection, lastDisconnect, qr } = update;
-    if(qr) qrString=qr;
-    if(connection==='open'){ console.log('✅ Bot connected'); qrString=null; }
-    if(connection==='close'){
-      const shouldReconnect = lastDisconnect?.error?.output?.statusCode!== DisconnectReason.loggedOut;
-      if(shouldReconnect) startBot();
-    }
-  });
+def clean_price(price_val):
+  if not price_val:
+    return 0.0
+  try:
+    arabic_digits = "٠١٢٣٤٥٦٧٨٩"
+    english_digits = "0123456789"
+    trans = str.maketrans(arabic_digits, english_digits)
+    clean_str = str(price_val).translate(trans)
+    clean_str = re.sub(r"[^\d.]", "", clean_str)
+    return float(clean_str) if clean_str else 0.0
+  except:
+    return 0.0
 
-  sock.ev.on('messages.upsert', async ({messages})=>{
-    const m=messages[0]; if(!m.message||m.key.fromMe) return;
-    const from=m.key.remoteJid;
-    let text=m.message.conversation||m.message.extendedTextMessage?.text||''; text=text.trim();
-    const lower=text.toLowerCase();
-    if(!sessions[from]) sessions[from]={step:'start'};
-    const session=sessions[from];
-    const products=loadProducts();
 
-    // رجوع للقائمة
-    if(lower==='القائمة'||lower==='0'){ sessions[from]={step:'start'}; await sock.sendMessage(from,{text:WELCOME_MSG}); return; }
+def get_dozens(name_text):
+  if not name_text:
+    return 2
+  match = re.search(r"(\d+)\s*دسته", str(name_text))
+  return int(match.group(1)) if match else 2
 
-    // 1- البحث بكود مباشر في اي وقت
-    let directProduct = products.find(p=> lower.includes(p.code.toLowerCase()));
-    if(directProduct && text.length < 20){
-      const det=getCartonDetails(directProduct);
-      session.product=directProduct; session.step='ask_qty';
-      const caption=`✅ *${directProduct.name}*\nالكود: ${directProduct.code}\nالقسم: ${directProduct.category}\nالكرتونة: ${det.dozenCount} دستة (${det.pieces} حبة)\nسعر الكرتونة: *${det.price.toLocaleString()} جنيه*\nسعر الدستة: ${det.priceDozen.toLocaleString()} جنيه`;
-      try{
-        if(directProduct.image) await sock.sendMessage(from,{image:{url:directProduct.image}, caption});
-        else await sock.sendMessage(from,{text:caption});
-      }catch{ await sock.sendMessage(from,{text:caption}); }
-      await sock.sendMessage(from,{text:`كم كرتونة من هذا الصنف *${directProduct.name}* تريد؟`});
-      return;
-    }
 
-    if(session.step==='start'){
-      sessions[from].step='choose_category';
-      await sock.sendMessage(from,{text:WELCOME_MSG}); return;
-    }
+class RequestHandler(BaseHTTPRequestHandler):
 
-    // 2- عرض الاقسام - التعديل المطلوب هنا
-    if(session.step==='choose_category'){
-      let cat=null; let isAll=false;
-      if(text==='1'||lower.includes('رجالي')) cat='رجالي';
-      else if(text==='2'||lower.includes('نسائي')) cat='نسائي';
-      else if(text==='3'||lower.includes('اطفالي')) cat='اطفالي';
-      else if(text==='4'||lower.includes('صبياني')) cat='صبياني';
-      else if(text==='5') isAll=true;
+  # إضافة الاستجابة لطلبات GET لفحص حالة السيرفر على Render
+  def do_GET(self):
+    self.send_response(200)
+    self.send_header("Content-Type", "text/plain; charset=utf-8")
+    self.end_headers()
+    self.wfile.write(
+        "✅ Server is running successfully on Render!".encode("utf-8")
+    )
 
-      if(cat||isAll){
-        const filtered = isAll? products : products.filter(p=> p.category===cat);
-        if(filtered.length===0){ await sock.sendMessage(from,{text:`لا يوجد اصناف في ${cat}`}); return; }
+  def do_POST(self):
+    try:
+      content_length = int(self.headers.get("Content-Length", 0))
+      post_data = self.rfile.read(content_length)
 
-        session.lastCategory=cat; session.step='choose_product';
-        await sock.sendMessage(from,{text:`📦 *اصناف ${isAll?'كل الاصناف':cat}* - ${filtered.length} صنف\nسأعرضها لك بنفس طريقة عرض الكود...`});
+      try:
+        data = json.loads(post_data.decode("utf-8"))
+      except:
+        data = {}
 
-        // هذا هو طلبك: عرض كل صنف بصورة وتفاصيله كاملة
-        for(let p of filtered){
-          const det=getCartonDetails(p);
-          const cap=`✅ *${p.name}*\nالكود: ${p.code}\nالقسم: ${p.category}\nالكرتونة: ${det.dozenCount} دستة (${det.pieces} حبة)\nسعر الكرتونة: *${det.price.toLocaleString()} جنيه*`;
-          try{
-            if(p.image) await sock.sendMessage(from,{image:{url:p.image}, caption:cap});
-            else await sock.sendMessage(from,{text:cap});
-          }catch(e){ await sock.sendMessage(from,{text:cap}); }
-          await new Promise(r=>setTimeout(r, 1000));
-        }
-        await sock.sendMessage(from,{text:`👆 هذه كل اصناف ${cat}\nالآن ارسل كود الصنف الذي تريده لطلبه`});
-        return;
-      }
-    }
+      sender = data.get("query", {}).get("sender", "default_user")
+      msg = str(data.get("query", {}).get("message", "")).strip()
 
-    // 3- استلام عدد الكراتين - التعديل المطلوب
-    if(session.step==='ask_qty'){
-      const qty=parseInt(text.replace(/[^0-9]/g,''));
-      if(isNaN(qty)||qty<=0){ await sock.sendMessage(from,{text:`❌ ارسل عدد الكراتين كرقم مثلا: 2`}); return; }
-      const prod=session.product; const det=getCartonDetails(prod);
-      const total=det.price*qty; session.qty=qty; session.total=total; session.step='confirm';
-      await sock.sendMessage(from,{text:`🧾 *فاتورة مبدئية - شركة ابو حريره*\n━━━━━━━━━━━━━━━━\nالصنف: ${prod.name}\nالكود: ${prod.code}\nالقسم: ${prod.category}\nالكرتونة: ${det.dozenCount} دستة (${det.pieces} حبة)\nسعر الكرتونة: ${det.price.toLocaleString()} جنيه\nعدد الكراتين: ${qty}\n━━━━━━━━━━━━━━━━\n*💰 الإجمالي: ${total.toLocaleString()} جنيه*\n━━━━━━━━━━━━━━━━\nالبيع بالكرتونة فقط\n\n✅ للتأكيد ارسل *نعم*\n❌ للالغاء ارسل *0*`});
-      return;
-    }
+      num = parse_arabic_int(msg)
 
-    // 4- التأكيد النهائي - التعديل المطلوب الثاني
-    if(session.step==='confirm' && (lower.includes('نعم')||lower==='yes')){
-      await sock.sendMessage(from,{text:`✅ *تم تأكيد طلبك بنجاح!*\n\n💳 *بيانات السداد عبر بنكك:*\nرقم الحساب: *2392448*\nباسم: *الشيخ السراج المامون الشيخ*\nالمبلغ المطلوب: *${session.total.toLocaleString()} جنيه*\n📦 الطلب: ${session.product.name} (${session.qty} كرتونة)\n\n📸 *بعد التحويل أرسل:*\n1. صورة إشعار التحويل\n2. اسمك الثلاثي\n3. الجهة التي تريد ترحيل البضاعة اليها والترحيلات\n4. رقم هاتفك\n\n🏢 *شركة ابو حريره*`});
-      sessions[from]={step:'start'}; return;
-    }
-  });
-}
+      # جلب أو إنشاء الجلسة
+      session = user_sessions.get(
+          sender, {"step": "WELCOME", "cart": [], "filtered": []}
+      )
+      current_step = session.get("step", "WELCOME")
 
-app.get('/', async (req,res)=>{
-  if(sock?.user) return res.send(`<h1>✅ البوت شغال ${sock.user.id} - المنتجات ${loadProducts().length}</h1>`);
-  if(!qrString) return res.send('<h1>جاري توليد QR...</h1><meta http-equiv="refresh" content="2">');
-  const qrImg=await QRCode.toDataURL(qrString);
-  res.send(`<center><img src="${qrImg}" width="300"><p>امسح بواتساب الشركة</p><script>setTimeout(()=>location.reload(),4000)</script></center>`);
-});
-app.listen(PORT, ()=> console.log(PORT));
-startBot();
+      products = load_products()
+      categories_map = {1: "رجالي", 2: "نسائي", 3: "صبياني", 4: "اطفالي"}
+      reply = ""
+
+      # 1. القائمة الرئيسية
+      if msg == "0" or current_step == "WELCOME":
+        session["step"] = "SELECT_CATEGORY"
+        session["cart"] = []
+        reply = (
+            "مرحب بكم في شركة أبوحريرة الوكيل الحصري بالسودان لأحذية لوفو 👟\n⚠️"
+            " تنبيه: البيع بالكرتونة فقط لا يوجد بيع بالدسته أو بالحبة.\n📍"
+            " فروعنا: مدني وسوق ليبيا.\n\nاختر القسم:\n1. رجالي\n2. نسائي\n3."
+            " صبياني\n4. اطفالي\n\n0. الرجوع للقائمة الرئيسية في أي وقت"
+        )
+
+      # 2. اختيار القسم
+      elif current_step == "SELECT_CATEGORY":
+        if num in categories_map:
+          cat_name = categories_map[num]
+          filtered = [
+              p for p in products if cat_name in p.get("category", "")
+          ]
+          session["filtered"] = filtered
+
+          if not filtered:
+            reply = (
+                f"عذراً، لا توجد أصناف متوفرة في قسم ({cat_name}).\n\n0."
+                " للرجوع للقائمة"
+            )
+          else:
+            session["step"] = "SELECT_ITEM"
+            reply = f"--- أصناف ({cat_name}) ---\n\n"
+            for idx, item in enumerate(filtered, 1):
+              code = item.get("code", "بدون كود")
+              img = item.get("image", "")
+              reply += f"{idx}. كود: {code}\n🔗 الصورة: {img}\n\n"
+            reply += "اختر رقم صنف واحد فقط من القائمة (أو 0 للرجوع):"
+        else:
+          reply = "⚠️ خيار غير صحيح! اختر رقم من (1 إلى 4) أو 0 للرجوع."
+
+      # 3. اختيار الصنف
+      elif current_step == "SELECT_ITEM":
+        filtered = session.get("filtered", [])
+        if num and 1 <= num <= len(filtered):
+          session["current_item"] = filtered[num - 1]
+          session["step"] = "ENTER_QTY"
+          item_code = session["current_item"].get("code", "")
+          reply = (
+              f"داير كم كرتونة من كود [{item_code}]؟\n(أدخل الرقم فقط، مثلاً: 1"
+              " أو 2)"
+          )
+        else:
+          reply = (
+              "⚠️ خطأ! أدخل رقم الصنف من القائمة الموضحة اعلاه، أو 0 للرجوع."
+          )
+
+      # 4. إدخال الكمية
+      elif current_step == "ENTER_QTY":
+        if num and num > 0:
+          session["cart"].append(
+              {"item": session.get("current_item", {}), "qty": num}
+          )
+          session["step"] = "ASK_MORE"
+          reply = (
+              "تمت إضافة الصنف للسلة ✅\n\nهل تريد صنف آخر؟\n• اكتب (0) للرجوع"
+              " وتصفح صنف/قسم آخر.\n• أو اكتب (1) لإصدار الفاتورة المبدئية."
+          )
+        else:
+          reply = "⚠️ أدخل عدد كراتين صحيح (مثال: 1 أو 2)."
+
+      # 5. السؤال أو إصدار الفاتورة
+      elif current_step == "ASK_MORE":
+        if num == 0:
+          session["step"] = "SELECT_CATEGORY"
+          reply = "اختر القسم:\n1. رجالي\n2. نسائي\n3. صبياني\n4. اطفالي"
+        elif num == 1:
+          cart = session.get("cart", [])
+          if not cart:
+            reply = "سلتك فارغة! اكتب 0 للبدء واختيار الأصناف."
+          else:
+            total_all = 0
+            reply = (
+                "🧾 *الفاتورة المبدئية - شركة أبو"
+                " حريرة*\n========================================\n"
+            )
+            for idx, entry in enumerate(cart, 1):
+              item = entry.get("item", {})
+              qty = entry.get("qty", 1)
+
+              price_dozen = clean_price(
+                  item.get("priceDozen")
+                  or item.get("سعر_الدستة")
+                  or item.get("price", 0)
+              )
+              dozens_per_carton = get_dozens(
+                  item.get("name") or item.get("اسم_الصنف", "")
+              )
+
+              carton_price = price_dozen * dozens_per_carton
+              item_total = carton_price * qty
+              total_all += item_total
+
+              reply += (
+                  f"{idx}. كود الصنف: {item.get('code', '')}\n   الكمية: {qty}"
+                  f" كرتونة | الإجمالي: {item_total:,.0f} ج.س\n   🔗"
+                  f" {item.get('image', '')}\n\n"
+              )
+
+            reply += "----------------------------------------\n"
+            reply += f"💰 *الجملة الإجمالية:* {total_all:,.0f} جنيه سوداني\n"
+            reply += "========================================\n\n"
+            reply += "اكتب (1) للتأكيد والتحويل، أو (2) للإلغاء."
+            session["step"] = "CONFIRM_INVOICE"
+        else:
+          reply = "⚠️ اكتب (0) لاختيار صنف آخر، أو (1) لإصدار الفاتورة."
+
+      # 6. تأكيد الطلب
+      elif current_step == "CONFIRM_INVOICE":
+        if msg == "1" or num == 1:
+          reply = (
+              "✅ تم تأكيد طلبك مبدئياً!\n\nيرجى تحويل المبلغ إلى حسابنا:\n🏦"
+              " بنك الخرطوم: 2392448\n👤 الاسم: الشيخ السراج المأمون\n\nبعد"
+              " التحويل يرجى إرسال:\n1. الإشعار (صورة)\n2. الاسم كامل\n3. الجهة"
+              " المرحل لها واسم الترحيلات."
+          )
+          session = {"step": "WELCOME", "cart": [], "filtered": []}
+        else:
+          reply = "❌ تم إلغاء الطلب. اكتب (0) للبدء من جديد في أي وقت."
+          session = {"step": "WELCOME", "cart": [], "filtered": []}
+
+      else:
+        reply = "يرجى كتابة رقم (0) للرجوع للقائمة الرئيسية."
+        session = {"step": "WELCOME", "cart": [], "filtered": []}
+
+      user_sessions[sender] = session
+      response_payload = json.dumps({"replies": [{"message": reply}]})
+
+    except Exception as general_error:
+      print("حدث خطأ:", general_error)
+      response_payload = json.dumps({
+          "replies": [{
+              "message": (
+                  "✅ تم التأكيد. يرجى إرسال (0) للرجوع للقائمة الرئيسية في أي"
+                  " وقت."
+              )
+          }]
+      })
+
+    self.send_response(200)
+    self.send_header("Content-Type", "application/json")
+    self.end_headers()
+    self.wfile.write(response_payload.encode("utf-8"))
+
+
+def run(server_class=HTTPServer, handler_class=RequestHandler):
+  # قراءة البورت المخصص من متغيرات بيئة Render أو استخدام 5000 افتراضياً
+  port = int(os.environ.get("PORT", 5000))
+  server_address = ("0.0.0.0", port)
+  httpd = server_class(server_address, handler_class)
+  print(f"✅ السيرفر يعمل ويستقبل على البورت {port}...")
+  httpd.serve_forever()
+
+
+if __name__ == "__main__":
+  run()
