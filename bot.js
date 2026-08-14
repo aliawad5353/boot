@@ -17,7 +17,7 @@ app.get('/', async (req, res) => {
         return res.send(`
             <div style="text-align: center; font-family: sans-serif; margin-top: 50px;">
                 <h1 style="color: #2e7d32;">✅ البوت متصل بالواتساب بنجاح!</h1>
-                <p style="font-size: 18px;">سيرفر أبو حريرة يعمل في الخلفية ويستقبل طلبات الزبائن بتدفق تفاعلي.</p>
+                <p style="font-size: 18px;">سيرفر أبو حريرة يعمل في الخلفية ويستقبل طلبات الزبائن (تدفق كلمة "لا").</p>
             </div>
         `);
     }
@@ -170,29 +170,71 @@ async function startBot() {
     });
 }
 
-// نص مساعد لعرض خيارات الأقسام الأخرى وتأكيد الشراء
+// نص مساعد لعرض خيارات الاستمرار أو الإنهاء بـ "لا"
 function getContinueShoppingText(session) {
-    const currentCatId = session.currentCategoryId;
     const catName = session.currentCategoryName;
-    
-    let text = `👇 *هل تريد صنف آخر من [${catName}]؟* اكتب رقمه.\n\n` +
-               `📦 *للانتقال لأنواع أخرى اضغط:* \n`;
-    
-    if (currentCatId !== 1) text += `*(1)* للرجالي\n`;
-    if (currentCatId !== 2) text += `*(2)* للنسائي\n`;
-    if (currentCatId !== 3) text += `*(3)* للصبياني\n`;
-    if (currentCatId !== 4) text += `*(4)* للاطفالي\n`;
-    
-    text += `\n🛒 *لإكمال الطلب والشراء اضغط:* \n` +
-            `*(5)* لمراجعة السلة وتأكيد الشراء.`;
-            
-    return text;
+    return `👇 *هل تريد صنف آخر من [${catName}]؟* اكتب رقمه.\n\n` +
+           `🔄 *لاختيار قسم آخر:* اضغط *(0)* للرجوع للرئيسية.\n\n` +
+           `✅ *لإنهاء الطلب وإصدار الفاتورة:* اكتب *(لا)*.`;
 }
 
-// 4. دالة المحادثة التفاعلية بتدفق التسوق المستمر
+// دالة لإصدار الفاتورة المبدئية المجمعة بالصور
+async function sendBulkInvoice(sender, session) {
+    const cart = session.cart || [];
+    if (cart.length === 0) {
+        await sock.sendMessage(sender, { text: "السلة فارغة! اضغط 0 لاختيار الأصناف." });
+        return;
+    }
+
+    session.step = "CONFIRM_INVOICE";
+    let totalAll = 0;
+    
+    await sock.sendMessage(sender, { text: "🧾 *جاري إصدار الفاتورة المبدئية المجمعة... يرجى الانتظار ثوانٍ* ⏳" });
+    await delay(1000);
+
+    // حلقة تكرارية لإرسال صورة كل صنف في الفاتورة مع بياناته
+    for (let i = 0; i < cart.length; i++) {
+        const entry = cart[i];
+        const item = entry.item;
+        const qty = entry.qty;
+        const imageUrl = item.image;
+        
+        const priceDozen = cleanPrice(item.priceDozen || item.سعر_الدستة || 0);
+        const dozensPerCarton = getDozens(item.name || item.اسم_الصنف || "");
+        const cartonPrice = priceDozen * dozensPerCarton;
+        const itemTotal = cartonPrice * qty;
+        totalAll += itemTotal;
+
+        const captionText = `🎯 *صنف فاتورة #${i + 1}*\n` +
+                           `*الكود:* ${item.code}\n` +
+                           `*الصنف:* ${item.اسم_الصنف || 'حذاء لوفو'}\n` +
+                           `*الكمية المطلوبة:* (${qty}) كرتونة\n` +
+                           `*سعر الكرتونة:* ${cartonPrice.toLocaleString('en-US')} ج.س\n` +
+                           `💰 *الإجمالي لهذا الصنف:* *${itemTotal.toLocaleString('en-US')} ج.س*`;
+
+        if (imageUrl && (imageUrl.startsWith('http://') || imageUrl.startsWith('https://'))) {
+            await sock.sendMessage(sender, { image: { url: imageUrl }, caption: captionText });
+            await delay(1200); // تأخير لضمان الترتيب
+        } else {
+            await sock.sendMessage(sender, { text: captionText });
+        }
+    }
+
+    // رسالة الإجمالي النهائي وطلب التأكيد
+    const finalMsg = `----------------------------------------\n` +
+                     `💰 *💰 إجمالي الفاتورة النهائي:* *${totalAll.toLocaleString('en-US')} جنيه سوداني*\n` +
+                     `========================================\n\n` +
+                     `*للتاكيد النهائي وإرسال بيانات التحويل اضغط (1)*\n*للإلغاء اضغط (2)*`;
+    
+    await sock.sendMessage(sender, { text: finalMsg });
+}
+
+// 4. دالة المحادثة التفاعلية بتدفق كلمة "لا"
 async function handleUserMessage(sender, textMsg) {
     const num = parseArabicInt(textMsg);
-    // session structure: { step, cart, filtered, currentCategoryId, currentCategoryName, currentItem }
+    const lowerMsg = textMsg.toLowerCase().trim();
+    const isNo = lowerMsg === 'لا' || lowerMsg === 'لاء' || lowerMsg === 'no';
+    
     let session = userSessions[sender] || { step: "WELCOME", cart: [], filtered: [] };
     let currentStep = session.step || "WELCOME";
 
@@ -201,11 +243,11 @@ async function handleUserMessage(sender, textMsg) {
 
     // 🟢 القائمة الرئيسية
     if (textMsg === "0" || currentStep === "WELCOME") {
-        session = { step: "SELECT_CATEGORY", cart: session.cart || [], filtered: [] }; // الحفاظ على السلة
+        session = { step: "SELECT_CATEGORY", cart: session.cart || [], filtered: [] };
         const replyText = "مرحب بكم في شركة أبوحريرة الوكيل الحصري بالسودان لأحذية لوفو 👟\n📍 فروعنا: مدني وسوق ليبيا.\n\n⚠️ البيع بالكرتونة فقط.\n\nاختر القسم للبدء:\n1. رجالي\n2. نسائي\n3. صبياني\n4. اطفالي";
         await sock.sendMessage(sender, { text: replyText });
     }
-    // 🟢 اختيار القسم أو الانتقال لقسم آخر أو الذهاب للمراجعة
+    // 🟢 اختيار القسم واستعراض الأصناف
     else if (currentStep === "SELECT_CATEGORY") {
         if (num && num >= 1 && num <= 4) {
             session.currentCategoryId = num;
@@ -239,7 +281,7 @@ async function handleUserMessage(sender, textMsg) {
 
                     if (imageUrl && (imageUrl.startsWith('http://') || imageUrl.startsWith('https://'))) {
                         await sock.sendMessage(sender, { image: { url: imageUrl }, caption: captionText });
-                        await delay(1200); // تأخير لترتيب الوصول
+                        await delay(1200); 
                     } else {
                         await sock.sendMessage(sender, { text: captionText });
                     }
@@ -247,37 +289,20 @@ async function handleUserMessage(sender, textMsg) {
                 await sock.sendMessage(sender, { text: `👆 أكتب رقم الصنف للطلب (من 1 إلى ${filtered.length})\nأو اضغط 0 للرجوع للقائمة الرئيسية.` });
             }
         } 
-        // خيار مراجعة السلة (رقم 5 متاح فيSELECT_CATEGORY)
-        else if (num === 5) {
-            const cart = session.cart || [];
-            if (cart.length === 0) {
-                await sock.sendMessage(sender, { text: "السلة فارغة! اختر قسماً لبدء التسوق (1-4)." });
-            } else {
-                session.step = "REVIEW_CART";
-                let reviewText = "🛒 *مراجعة سلة التسوق الخاصة بك*:\n\n";
-                cart.forEach((entry, idx) => {
-                    reviewText += `${idx + 1}. الكود: [${entry.item.code}] | الكمية: (${entry.qty}) كرتونة\n`;
-                });
-                reviewText += "\n✅ *للشراء وإصدار الفاتورة اضغط (1)*\n❌ *للإلغاء والبدء من جديد اضغط (2)*";
-                await sock.sendMessage(sender, { text: reviewText });
-            }
-        }
         else {
             await sock.sendMessage(sender, { text: "⚠️ خيار غير صحيح! اختر رقم القسم (1-4) أو 0 للرجوع." });
         }
     }
-    // 🟢 الزبون في صفحة عرض الأصناف واختار صنفاً
+    // 🟢 اختيار صنف محدد
     else if (currentStep === "SELECT_ITEM") {
         const filtered = session.filtered || [];
         
-        // التحقق إذا اختار صنفاً من القائمة المروضة
         if (num && num >= 1 && num <= filtered.length) {
             session.currentItem = filtered[num - 1];
             session.step = "ENTER_QTY";
             const itemCode = session.currentItem.code || "";
             await sock.sendMessage(sender, { text: `🎯 *اخترت الصنف كود [${itemCode}]*\n\nداير منه كم كرتونة؟ (أدخل الرقم فقط):` });
         } 
-        // الزبون ضغط 0 للرجوع للقائمة الرئيسية
         else if (textMsg === "0") {
             session = { step: "SELECT_CATEGORY", cart: session.cart || [], filtered: [] };
             await sock.sendMessage(sender, { text: "اختر القسم:\n1. رجالي\n2. نسائي\n3. صبياني\n4. اطفالي" });
@@ -296,80 +321,39 @@ async function handleUserMessage(sender, textMsg) {
             await sock.sendMessage(sender, { text: `✅ تمت إضافة (${num}) كرتونة من الكود [${session.currentItem.code}] بنجاح.` });
             await delay(500);
             
-            // إرسال رسالة الخيارات الجديدة (البقاء في القسم، الانتقال، الشراء)
+            // إرسال رسالة الخيارات الجديدة (البقاء، الانتقال، أو "لا")
             const nextStepText = getContinueShoppingText(session);
             await sock.sendMessage(sender, { text: nextStepText });
         } else {
             await sock.sendMessage(sender, { text: "⚠️ أدخل عدد كراتين صحيح (مثال: 1 أو 2)." });
         }
     }
-    // 🟢 خطوة استمرار التسوق (التعامل مع الخيارات بعد إضافة الكمية)
+    // 🟢 خطوة استمرار التسوق (التعامل مع كلمة "لا")
     else if (currentStep === "CONTINUE_SHOPPING") {
         const filtered = session.filtered || [];
         
-        // 1. هل اختار صنفاً آخر من نفس القسم المفتوح؟
+        // 1. هل اختار صنفاً آخر من نفس القسم؟
         if (num && num >= 1 && num <= filtered.length) {
-            // الانتقال مباشرة لتحديد الكمية للصنف الجديد
             session.currentItem = filtered[num - 1];
             session.step = "ENTER_QTY";
             await sock.sendMessage(sender, { text: `🎯 *اخترت الصنف كود [${session.currentItem.code}]*\n\nداير منه كم كرتونة؟ (أدخل الرقم فقط):` });
         }
-        // 2. هل اختار الانتقال لقسم آخر (1-4)؟
-        else if (num && num >= 1 && num <= 4) {
-            // تحديث القسم وإعادة عرض الأصناف
-            session.step = "SELECT_CATEGORY";
-            // نقوم بتمرير النص لـ handleUserMessage كأنه رسالة جديدة لتنفيذ كود عرض الأصناف
-            await handleUserMessage(sender, textMsg); 
+        // 2. هل اختار الرجوع للرئيسية؟
+        else if (textMsg === "0") {
+            session = { step: "SELECT_CATEGORY", cart: session.cart || [], filtered: [] };
+            await sock.sendMessage(sender, { text: "اختر القسم:\n1. رجالي\n2. نسائي\n3. صبياني\n4. اطفالي" });
         }
-        // 3. هل اختار مراجعة السلة وإكمال الشراء (رقم 5)؟
-        else if (num === 5) {
-            session.step = "REVIEW_CART";
-            let reviewText = "🛒 *مراجعة سلة التسوق الخاصة بك*:\n\n";
-            session.cart.forEach((entry, idx) => {
-                reviewText += `${idx + 1}. الكود: [${entry.item.code}] | الكمية: (${entry.qty}) كرتونة\n`;
-            });
-            reviewText += "\n✅ *للشراء وإصدار الفاتورة اضغط (1)*\n❌ *للإلغاء والبدء من جديد اضغط (2)*";
-            await sock.sendMessage(sender, { text: reviewText });
+        // 3. هل كتب "لا" لإنهاء الطلب؟ 🌟🌟🌟
+        else if (isNo) {
+            // استدعاء دالة إصدار الفاتورة المجمعة بالصور
+            await sendBulkInvoice(sender, session);
         }
         else {
             const nextStepText = getContinueShoppingText(session);
             await sock.sendMessage(sender, { text: `⚠️ خيار غير صحيح.\n\n${nextStepText}` });
         }
     }
-    // 🟢 خطوة مراجعة السلة (تأكيد 1 للشراء / 2 للإلغاء)
-    else if (currentStep === "REVIEW_CART") {
-        if (num === 1) {
-            // إصدار الفاتورة المبدئية التفصيلية
-            session.step = "CONFIRM_INVOICE";
-            let totalAll = 0;
-            let invoiceText = "🧾 *الفاتورة المبدئية التفصيلية - شركة أبو حريرة*\n========================================\n\n";
-            
-            session.cart.forEach((entry, idx) => {
-                const item = entry.item || {};
-                const qty = entry.qty || 1;
-                const priceDozen = cleanPrice(item.priceDozen || item.سعر_الدستة || 0);
-                const dozensPerCarton = getDozens(item.name || item.اسم_الصنف || "");
-                const cartonPrice = priceDozen * dozensPerCarton;
-                const itemTotal = cartonPrice * qty;
-                totalAll += itemTotal;
-
-                invoiceText += `${idx + 1}. كود: *${item.code || ''}*\n   الكمية: ${qty} كرتونة | الإجمالي: ${itemTotal.toLocaleString('en-US')} ج.س\n\n`;
-            });
-
-            invoiceText += "----------------------------------------\n";
-            invoiceText += `💰 *إجمالي الفاتورة النهائي:* *${totalAll.toLocaleString('en-US')} جنيه سوداني*\n`;
-            invoiceText += "========================================\n\n";
-            invoiceText += "*للتاكيد النهائي وإرسال بيانات التحويل اضغط (1)*\n*للإلغاء اضغط (2)*";
-            
-            await sock.sendMessage(sender, { text: invoiceText });
-        } else if (num === 2) {
-            await sock.sendMessage(sender, { text: "❌ تم إلغاء الطلب وتفريغ السلة. اضغط 0 للبدء من جديد." });
-            session = { step: "WELCOME", cart: [], filtered: [] };
-        } else {
-            await sock.sendMessage(sender, { text: "⚠️ اضغط (1) للتأكيد والذهاب للفاتورة، أو (2) للإلغاء." });
-        }
-    }
-    // 🟢 خطوة التأكيد النهائي على الفاتورة المبدئية
+    // 🟢 خطوة التأكيد النهائي على الفاتورة المجمعة
     else if (currentStep === "CONFIRM_INVOICE") {
         if (num === 1) {
             const bankText = "✅ *تم تأكيد طلبك بنجاح!*\n\n" +
@@ -382,7 +366,6 @@ async function handleUserMessage(sender, textMsg) {
                              "3️⃣ المدينة واسم شركة الترحيلات المطلوبة.\n\n" +
                              "شكراً لتعاملكم مع شركة أبو حريرة! ❤️";
             await sock.sendMessage(sender, { text: bankText });
-            // تصفير الجلسة بعد النجاح
             session = { step: "WELCOME", cart: [], filtered: [] };
         } else {
             await sock.sendMessage(sender, { text: "❌ تم إلغاء الطلب. اضغط 0 للبدء من جديد في أي وقت." });
