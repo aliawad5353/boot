@@ -205,7 +205,7 @@ function getContinueShoppingText(session) {
     const catName = session.currentCategoryName;
     return `👇 *هل تريد صنف آخر من [قسم ${catName}]؟* اكتب رقم الصنف.\n\n` +
            `🔄 *لاختيار قسم آخر:* اضغط *(0)* للرجوع للرئيسية.\n\n` +
-           `🧾 *لإنهاء الطلب وطباعة الفاتورة:* اكتب رقم *(1)*.`;
+           `🧾 *لإنهاء الطلب وطباعة الفاتورة:* اكتب *(00)*.`;
 }
 
 // دالة إصدار الفاتورة المبدئية المجمعة بالصور
@@ -282,7 +282,8 @@ async function handleUserMessage(sender, textMsg) {
             }
         }
 
-        const num = parseArabicInt(textMsg);
+        const rawText = textMsg.trim();
+        const num = parseArabicInt(rawText);
         
         let session = userSessions[sender] || { step: "WELCOME", cart: [], filtered: [] };
         let currentStep = session.step || "WELCOME";
@@ -291,12 +292,13 @@ async function handleUserMessage(sender, textMsg) {
         const categoriesMap = { 1: "رجالي", 2: "نسائي", 3: "صبياني", 4: "اطفالي" };
 
         // 🟢 القائمة الرئيسية ورسالة الترحيب المعدلة
-        if (textMsg === "0" || currentStep === "WELCOME") {
+        if (rawText === "0" || currentStep === "WELCOME") {
             session = { step: "SELECT_CATEGORY", cart: session.cart || [], filtered: [] };
             const welcomeText = `✨ *مرحبا بكم في شركة أبوحريرة* ✨\n` +
                                 `الوكيل الحصري لأحذية *لوفو (LUFO)* بالسودان 👟👠\n\n` +
                                 `⚠️ *تنبيه مهم جداً:*\n` +
-                                `- البيع بالكرتونة فقط (لا يوجد بيع بالدستة ولا بالحبه).\n` +
+                                `- البيع بالجملة فقط (لا يوجد بيع بالحبه ولا بالدستة).\n` +
+                                `- الأصناف التي تظهر لك هي الأصناف المتوفرة فقط، لا تسأل عن صنف لا يظهر لك، وإذا توفر أي صنف آخر سندمجه مع الأصناف تلقائياً.\n` +
                                 `- 🚫 *سيتم حظرك تلقائياً إذا اخترت أصناف وتم استخراج الفاتورة ولم تسدد.*\n\n` +
                                 `📌 *اتبع الخطوات الآتية واختر القسم:* \n` +
                                 `1️⃣ رجالي\n` +
@@ -361,7 +363,7 @@ async function handleUserMessage(sender, textMsg) {
                 const itemCode = session.currentItem.code || "";
                 await sock.sendMessage(sender, { text: `🎯 *اخترت الصنف كود [${itemCode}]*\n\nكم كرتونة تريد من هذا الصنف؟ (أدخل الرقم فقط):` });
             } 
-            else if (textMsg === "0") {
+            else if (rawText === "0") {
                 session = { step: "SELECT_CATEGORY", cart: session.cart || [], filtered: [] };
                 await sock.sendMessage(sender, { text: "📌 اختر القسم:\n1️⃣ رجالي\n2️⃣ نسائي\n3️⃣ صبياني\n4️⃣ أطفالي" });
             }
@@ -384,24 +386,24 @@ async function handleUserMessage(sender, textMsg) {
                 await sock.sendMessage(sender, { text: "⚠️ أدخل عدد كراتين صحيح (مثال: 1 أو 2)." });
             }
         }
-        // 🟢 خطوة استمرار التسوق أو كتابة 1 للإنهاء وطباعة الفاتورة
+        // 🟢 خطوة استمرار التسوق أو كتابة 00 لإنهاء الطلب وطباعة الفاتورة
         else if (currentStep === "CONTINUE_SHOPPING") {
             const filtered = session.filtered || [];
             
-            // 1. أرسل رقم الصنف للتسوق مجدداً
-            if (num && num >= 1 && num <= filtered.length) {
-                session.currentItem = filtered[num - 1];
-                session.step = "ENTER_QTY";
-                await sock.sendMessage(sender, { text: `🎯 *اخترت الصنف كود [${session.currentItem.code}]*\n\nكم كرتونة تريد من هذا الصنف؟ (أدخل الرقم فقط):` });
+            // 1. كتابة (00) أو (٠٠) لطباعة الفاتورة 🌟
+            if (rawText === "00" || rawText === "٠٠") {
+                await sendBulkInvoice(sender, session);
             }
             // 2. الرجوع للرئيسية اختيار قسم آخر
-            else if (textMsg === "0") {
+            else if (rawText === "0" || rawText === "٠") {
                 session = { step: "SELECT_CATEGORY", cart: session.cart || [], filtered: [] };
                 await sock.sendMessage(sender, { text: "📌 اختر القسم:\n1️⃣ رجالي\n2️⃣ نسائي\n3️⃣ صبياني\n4️⃣ أطفالي" });
             }
-            // 3. كتابة رقم (1) لطباعة الفاتورة 🌟
-            else if (num === 1) {
-                await sendBulkInvoice(sender, session);
+            // 3. أرسل رقم الصنف للتسوق مجدداً
+            else if (num && num >= 1 && num <= filtered.length) {
+                session.currentItem = filtered[num - 1];
+                session.step = "ENTER_QTY";
+                await sock.sendMessage(sender, { text: `🎯 *اخترت الصنف كود [${session.currentItem.code}]*\n\nكم كرتونة تريد من هذا الصنف؟ (أدخل الرقم فقط):` });
             }
             else {
                 const nextStepText = getContinueShoppingText(session);
@@ -410,7 +412,7 @@ async function handleUserMessage(sender, textMsg) {
         }
         // 🟢 خطوة التأكيد النهائي أو الإلغاء (الحظر)
         else if (currentStep === "CONFIRM_INVOICE") {
-            if (num === 1) {
+            if (rawText === "1" || rawText === "١") {
                 const bankText = "✅ *تم تأكيد طلبك بنجاح!*\n\n" +
                                  "يرجى تحويل المبلغ إلى حسابنا البنكي:\n" +
                                  "🏦 *بنك الخرطوم:* 2392448\n" +
@@ -424,7 +426,7 @@ async function handleUserMessage(sender, textMsg) {
                 session = { step: "WELCOME", cart: [], filtered: [] };
             } 
             // الإلغاء باختيار رقم (0) -> حظر لمدة ساعة
-            else if (num === 0) {
+            else if (rawText === "0" || rawText === "٠") {
                 blockedUsers[sender] = Date.now(); // تسجيل وقت الحظر
                 await sock.sendMessage(sender, { 
                     text: "❌ *تم إلغاء الفاتورة.*\n\n🚫 *بناءً على سياسة الشركة، تم إغلاق المحادثة معك لمدة ساعة واحدة.*" 
@@ -443,7 +445,6 @@ async function handleUserMessage(sender, textMsg) {
         userSessions[sender] = session;
     } catch (err) {
         console.error("❌ خطأ أثناء معالجة الرسالة للعميل:", err.message);
-        // التجاوز التلقائي دون انهيار السيرفر
     }
 }
 
